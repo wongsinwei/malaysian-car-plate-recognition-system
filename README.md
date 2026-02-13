@@ -1,1 +1,1 @@
-You able to get the application in the release category. name: v1
+You able to get the application in the releases category. name: v1
