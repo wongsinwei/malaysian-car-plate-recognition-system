@@ -1,4 +1,8 @@
 # Webcam to my FYP Project!
+
+## Installation
+* Proceed to releases and find V1 to get the application. Only download the exe file.
+
 > [!WARNING]
 > **GPU Required:** This application requires a dedicated graphics processing unit (GPU) to run. It will **not** work on a CPU-only device. Please ensure your system has a compatible GPU installed and configured before proceeding.
 > 
@@ -15,7 +19,4 @@ A Python application that converts a standard local webcam feed into a network-a
 
 Before you begin, ensure you have met the following requirements:
 * A working webcam connected to your host device.
-
-## Installation
-* Proceed to releases and find V1 to get the application. Only download the exe file.
 
