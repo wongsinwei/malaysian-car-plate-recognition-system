@@ -1,5 +1,7 @@
 # Webcam to my FYP Project!
-
+> [!WARNING]
+> **GPU Required:** This application requires a dedicated graphics processing unit (GPU) to run. It will **not** work on a CPU-only device. Please ensure your system has a compatible GPU installed and configured before proceeding.
+> 
 A Python application that converts a standard local webcam feed into a network-accessible IP camera stream. This allows you to monitor a live video feed from any device connected to the same local network.
 
 ## Features
