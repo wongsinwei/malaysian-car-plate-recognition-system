@@ -1,4 +1,4 @@
-# Webcam to IP Camera Streamer
+# Webcam to my FYP Project!
 
 A Python application that converts a standard local webcam feed into a network-accessible IP camera stream. This allows you to monitor a live video feed from any device connected to the same local network.
 
