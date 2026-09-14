@@ -110,7 +110,3 @@ For development, or to modify the detection/OCR logic.
   by detected vehicle class (car / motorcycle / truck).
 - Firebase security rules and password handling should be reviewed
   before any production deployment.
-
-## License
-
-Specify your license here (e.g. MIT).
