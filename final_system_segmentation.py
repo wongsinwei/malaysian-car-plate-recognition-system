@@ -2,39 +2,23 @@ import firebase_admin
 from firebase_admin import credentials, db
 import hashlib
 import datetime
-import os
-import sys
-
-def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-
-    return os.path.join(base_path, relative_path)
-
+from LRP_system import resource_path
 # --- CONFIGURATION ---
-# Make sure this matches your file name exactly
-CRED_PATH = resource_path("serviceAccountKey.json")
+CRED_PATH = "serviceAccountKey.json"
 # Your specific Database URL
-DB_URL = 'https://sadasd-88d5b-default-rtdb.asia-southeast1.firebasedatabase.app/'
+DB_URL = ''
 
 class FirebaseManager:
     def __init__(self):
         # 1. INITIALIZE FIREBASE
         if not firebase_admin._apps:
-            cred = credentials.Certificate(CRED_PATH)
+            cred = credentials.Certificate(resource_path(CRED_PATH))
             firebase_admin.initialize_app(cred, {
                 'databaseURL': DB_URL
             })
         
-        # We use the ROOT reference now, not just 'detections'
-        # This allows us to access 'users', 'admins', and 'cameras' too.
         self.ref = db.reference()
         
-        # Create default admin if strictly necessary
         self.ensure_admin_exists()
 
     def hash_password(self, password):
@@ -51,14 +35,11 @@ class FirebaseManager:
     # --- USER FUNCTIONS ---
     def register_user(self, username, password, email):
         users_ref = self.ref.child('users')
-        
-        # Check if username exists
+    
         snapshot = users_ref.order_by_child('username').equal_to(username).get()
         if snapshot:
             return False, "Username already exists"
 
-        
-        # Create new user
         new_user_ref = users_ref.child(username)
         new_user_ref.set({
             'username': username,
@@ -71,7 +52,6 @@ class FirebaseManager:
         
     def login_user(self, username, password):
         hashed_pw = self.hash_password(password)
-        # Search for user by username
         users = self.ref.child('users').order_by_child('username').equal_to(username).get()
         
         if users:
@@ -102,7 +82,7 @@ class FirebaseManager:
         # Store camera under /cameras/{user_id}/{camera_id}
         new_cam_ref = self.ref.child('cameras').child(user_id).push()
         new_cam_ref.set({
-            'ip_address': ip_address,  # The URL is stored safely as DATA here
+            'ip_address': ip_address,
             'created': str(datetime.datetime.now())
         })
 
@@ -146,27 +126,21 @@ class FirebaseManager:
         except Exception as e:
             print(f"Error deleting user: {e}")
             return False
-        
-        # ... inside FirebaseManager class ...
+
 
     def update_user_info(self, user_id, new_username, new_email, new_password=None):
-        """
-        Updates user profile. 
-        - Checks if new username is unique (if changed).
-        - Hashes password if provided.
-        """
         users_ref = self.ref.child('users')
         
         # 1. Get current data to compare
         current_data = users_ref.child(user_id).get()
         if not current_data:
-            return False, "User not found"
+            return False
 
         # 2. Check Username Uniqueness (Only if changed)
         if new_username != current_data.get('username'):
             snapshot = users_ref.order_by_child('username').equal_to(new_username).get()
             if snapshot:
-                return False, "Username already exists"
+                return False
 
         # 3. Prepare Update Data
         update_packet = {
@@ -186,12 +160,11 @@ class FirebaseManager:
             return False, str(e)
         
 # --- INSTANTIATE IMMEDIATELY ---
-# This allows other files to just import 'db_manager' or 'ref' directly
 try:
     db_manager = FirebaseManager()
-    ref = db_manager.ref # Expose 'ref' globally for backward compatibility
-    """print("✅ Database Connected via final_system_segmentation.py")"""
+    ref = db_manager.ref
+    #print("✅ Database Connected via final_system_segmentation.py")
 except Exception as e:
-    """print(f"❌ Database Connection Error: {e}")"""
+    print(f"❌ Database Connection Error: {e}")
     db_manager = None
     ref = None

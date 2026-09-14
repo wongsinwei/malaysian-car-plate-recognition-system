@@ -6,18 +6,32 @@ import os
 import sys
 import csv
 import re
+import logging
 import numpy as np
 from collections import Counter
 from ultralytics import YOLO
 import easyocr
 import threading
 
+# --- LOGGING SETUP ---
+_log_dir = os.path.join(os.path.expanduser("~"), "Downloads", "SmartLPR_Backup")
+os.makedirs(_log_dir, exist_ok=True)
+logging.basicConfig(
+    level=logging.CRITICAL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(os.path.join(_log_dir, "app.log"), encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+logger = logging.getLogger("SmartLPR")
+
 # --- FIREBASE IMPORT ---
 # Ensure final_system_segmentation.py is in the same folder
 try:
     from final_system_segmentation import ref, db_manager
-except ImportError:
-    # print("Firebase/Config not found. Cloud features disabled.")
+except ImportError as e:
+    logger.warning("Firebase/Config not found (%s). Cloud features disabled.", e)
     ref = None
     db_manager = None
 
@@ -36,26 +50,13 @@ COLOR_WARNING = "#e2983d" # Orange
 COLOR_DANGER = "#c92c2c"  # Red
 COLOR_CARD = "#2b2b2b"    # Card Background
 
-MALAYSIA_PLATE_REGEX = re.compile(r'^([A-Z]{1,3})(\d{1,4})([A-Z]?)$')
-
-VANITY_PREFIXES = [
-    "PUTRAJAYA", "PROTON", "PERODUA", "WAJA", "SUKOM", "LIMO", "RIMAU",
-    "BAMBEE", "IM4U", "1M4U", "PATRIOT", "VIP", "VIPS", "PERFECT", "NAAM",
-    "G1M", "GP", "US", "UP", "A1M", "GOLD", "MALAYSIA", "NBOS", "GTR",
-    "SAM", "K1M", "T1M", "FFF", "GG", "G", "FD", "FE", "FB", "X", "XX",
-    "YY", "UU", "Q", "KRISS", "LOTUS", "MADANI", "NBOS", "PETRA", "PUTRA",
-    "PERSONA", "PERDANA", "SATRIA", "SAS", "TIARA", "UNIMAS", "UNISZA", "UTEM",
-    "UiTM", "IIUM", "WAJA", "WCEC", "XIIINAM", "XOIC", 'XXVIASEAN', "XXXIDB",
-    "UUU"
-]
-
 # ==========================================
 # GLOBAL SETTINGS MANAGER
 # ==========================================
 class SystemConfig:
-    KNOWN_WIDTH = 1.8  # Avg car width in meters
-    FOCAL_LENGTH = 500 # Default calibration
-    TRIGGER_LINE_RATIO = 0.75 # Position of line (0.75 = 75% down)
+    KNOWN_WIDTH = 1.8  
+    FOCAL_LENGTH = 500 
+    TRIGGER_LINE_RATIO = 0.75 
     CONFIDENCE_THRESHOLD = 0.50
     LINE_OPACITY = 0.5
 
@@ -72,55 +73,93 @@ def estimate_distance_and_size(box_width, box_height):
     real_height_meters = (box_height * distance_meters) / SystemConfig.FOCAL_LENGTH
     return distance_meters, real_height_meters
 
-def preprocess_plate(img):
-    img = cv2.resize(img, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    kernel = np.array([[0, -1, 0],
-                       [-1, 5, -1],
-                       [0, -1, 0]])
-    sharpened = cv2.filter2D(gray, -1, kernel)
-    return sharpened
-
 def auto_correct_plate(text):
-    for vp in VANITY_PREFIXES:
-        if text.startswith(vp):
-            return text
-    # Prefix corrections: Common letter misreads (add more based on your logs)
-    prefix_corrections = {'O': 'Q', 'C': 'C', 'D': 'D', 'G': 'G', 'N':'W'}  # e.g., 'O' often 'Q' in prefixes
-    # Suffix corrections: Same as before, digit-focused
-    suffix_corrections = {'B': '8', 'O': '0', 'D': '0', 'I': '1', 'S': '5', 'Z': '2', 'Q': '0', 'G': '6', 'J':'3','Z':'7'}
+    text = text.upper().replace(" ", "").replace(".", "").replace("-", "")
     
-    text = text.upper().replace(" ", "").replace("-", "")
-    if len(text) < 2: return text
+    if len(text) < 2:
+        return None
+
+    # Anti-crop shield: Must contain at least one real letter
+    has_letter = any(char.isalpha() for char in text)
+    if not has_letter:
+        return None
+
+    # Added 'L': '1' to fix the PUKL issue
+    num_to_char = {'0': 'O', '1': 'I', '2': 'Z', '4': 'A', '5': 'S', '6': 'G', '8': 'B'}
+    char_to_num = {'O': '0', 'Q': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'A': '4', 'S': '5', 'G': '6', 'B': '8'}
+
+    if text[0].isdigit():
+        if text[0] in num_to_char:
+            text = num_to_char[text[0]] + text[1:]
+        else:
+            return None
+
+    first_digit_idx = -1
+    for i in range(1, len(text)):
+        if text[i].isdigit():
+            first_digit_idx = i
+            break
+            
+    if first_digit_idx == -1:
+        for i in range(1, len(text)):
+            if text[i] in char_to_num:
+                first_digit_idx = i
+                break
+                
+    if first_digit_idx == -1:
+        return None 
+
+    prefix = text[:first_digit_idx]
+    remainder = text[first_digit_idx:]
+
+    numbers = ""
+    suffix = ""
     
-    if MALAYSIA_PLATE_REGEX.match(text):
-        return text
+    for i, char in enumerate(remainder):
+        if len(numbers) < 4:
+            if char.isdigit():
+                numbers += char
+            elif char in char_to_num:
+                # FIX: Only allow it to be a suffix if we ALREADY have at least 1 number
+                if i == len(remainder) - 1 and len(numbers) > 0:
+                    suffix += char
+                else:
+                    # Force conversion if we desperately need a number
+                    numbers += char_to_num[char]
+            else:
+                suffix += remainder[i:]
+                break
+        else:
+            if char.isdigit():
+                suffix += num_to_char.get(char, "") 
+            else:
+                suffix += char
 
-    # Find numeric start (more robust: look for first sequence of 1+ digits)
-    match = re.search(r'\d+', text)
-    if not match:
-        return text  # Cannot recover
-    prefix = text[:match.start()]
-    rest   = text[match.start():]
+    if len(prefix) < 1 or len(numbers) < 1:
+        return None
+        
+    return prefix + numbers + suffix
 
-    # Prefix: letters only, max 3
-    prefix = ''.join(prefix_corrections.get(c,c) for c in prefix if c.isalpha())[:3]
+def preprocess_plate(img):
+    h, w = img.shape[:2]
 
-    # Extract numeric
-    digits = ''.join(suffix_corrections.get(c,c) for c in rest if c.isalnum())
-    number = ''.join(c for c in digits if c.isdigit())[:4]
+    crop = img[int(h * 0.08):int(h * 0.98), int(w * 0.03):int(w * 0.97)]
 
-    # Suffix: 1 letter max
-    suffix_letters = ''.join(c for c in rest if c.isalpha())
-    suffix = suffix_letters[-1] if suffix_letters else ''
+    stretched = cv2.resize(crop, None, fx=2.5, fy=1.0, interpolation=cv2.INTER_CUBIC)
+    
+    '''2. Grayscale
+    We convert to gray because color distracts the OCR, 
+    but we DO NOT convert to pure black/white.'''
+    gray = cv2.cvtColor(stretched, cv2.COLOR_BGR2GRAY)
+    inverted = cv2.bitwise_not(gray)
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(inverted)
 
-    candidate = prefix + number + suffix
+    kernel = np.ones((2, 2), np.uint8)
+    thinned = cv2.dilate(enhanced, kernel, iterations=1)
 
-    # Final validation
-    if MALAYSIA_PLATE_REGEX.match(candidate):
-        return candidate
+    return thinned
 
-    return text  # fallback
 
 def resource_path(relative_path):
     try:
@@ -326,7 +365,7 @@ class CameraSelectionFrame(ctk.CTkFrame):
             current_email = user_data.get('email', '')
             EditUserWindow(self, self.user_id, self.username, current_email, self.refresh_welcome)
         except Exception as e:
-            pass # print(f"Error fetching profile: {e}")
+            logger.error("Error fetching profile for user %s: %s", self.user_id, e)
 
     def refresh_welcome(self):
         u_data = ref.child('users').child(self.user_id).get()
@@ -341,7 +380,7 @@ class SettingsWindow(ctk.CTkToplevel):
         super().__init__(master)
         self.attributes('-topmost', True)
         self.title("System Configuration")
-        self.geometry("600x500")
+        self.geometry("600x550")
         
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.pack(fill="both", expand=True, padx=20, pady=20)
@@ -395,7 +434,8 @@ class SettingsWindow(ctk.CTkToplevel):
         try:
             val = float(self.entry_focal.get())
             SystemConfig.FOCAL_LENGTH = val
-        except ValueError: pass
+        except ValueError:
+            logger.warning("Invalid focal length input: %r (ignored)", self.entry_focal.get())
         self.destroy()
 
 # ==========================================
@@ -486,11 +526,12 @@ class EditRecordWindow(ctk.CTkToplevel):
             else:
                 ref.child('detection_logs').child(self.user_id).child(self.old_plate).update(new_data)
             
-            # print("✅ Record Updated")
+            logger.info("Record updated: %s -> %s", self.old_plate, new_plate)
             self.on_save() 
             self.destroy() 
         except Exception as e:
-            pass # print(f"❌ Save Error: {e}")
+            logger.error("Failed to save record edit for %s: %s", self.old_plate, e)
+            self.lbl_status.configure(text=f"Error: Save failed ({e})")
 
 # ==========================================
 # PAGE: ADMIN DASHBOARD
@@ -674,9 +715,9 @@ class UserHistoryWindow(ctk.CTkToplevel):
 
         bg_color = "#333" if row % 2 == 0 else "transparent"
         
-        # We need a frame for the background color effect, but grid makes it tricky with columns.
-        # So we just add labels directly but perhaps we can put them in a frame wrapper later.
-        # For simple list, let's just stick to direct grid on scroll frame with separators.
+        '''We need a frame for the background color effect, but grid makes it tricky with columns.
+        So we just add labels directly but perhaps we can put them in a frame wrapper later.
+        For simple list, let's just stick to direct grid on scroll frame with separators.'''
 
         def cell(c, txt, color="white"):
             lbl = ctk.CTkLabel(self.scroll, text=str(txt), text_color=color, anchor="center")
@@ -785,8 +826,9 @@ class DashboardFrame(ctk.CTkFrame):
         self.user_id = user_id 
         self.is_running = True
         self.cap = None 
+        self.frames_without_plate = 0
 
-        # print("Loading AI Models...")
+        logger.info("Loading AI models...")
         self.detector = YOLO(resource_path("best.pt"))
         self.color_model = YOLO(resource_path("color.pt"))
         # ADDED verbose=False to silence EasyOCR
@@ -800,7 +842,7 @@ class DashboardFrame(ctk.CTkFrame):
         self.img_folder = os.path.join(self.download_path, "captured_images")
         os.makedirs(self.img_folder, exist_ok=True)
         self.csv_filename = os.path.join(self.download_path, 'car_plate_records.csv')
-        # print(f"📂 Backup Folder: {self.download_path}")
+        logger.info("Backup folder: %s", self.download_path)
 
         threading.Thread(target=self.connect_camera, daemon=True).start()
         
@@ -819,7 +861,7 @@ class DashboardFrame(ctk.CTkFrame):
                 with open(self.csv_filename, 'w', newline='') as f:
                     csv.writer(f).writerow(self.csv_headers)
             except Exception as e:
-                """print(f"Error creating CSV headers: {e}")"""
+                logger.error("Error creating CSV headers at %s: %s", self.csv_filename, e)
 
 
             
@@ -842,7 +884,7 @@ class DashboardFrame(ctk.CTkFrame):
             self.after(0, self.update_camera)
             
         except Exception as e:
-            # print(f"Camera Init Error: {e}")
+            logger.error("Camera init error for source %s: %s", self.camera_ip, e)
             # Update UI label safely from thread
             self.after(0, lambda: self.video_label.configure(text=f"Connection Failed:\n{e}", text_color=COLOR_DANGER))
 
@@ -908,7 +950,7 @@ class DashboardFrame(ctk.CTkFrame):
         alpha = SystemConfig.LINE_OPACITY
         cv2.addWeighted(frame, alpha, overlay, 1 - alpha, 0, frame)
 
-        if self.frame_count % 5 == 0:
+        if self.frame_count % 3 == 0:
             results = self.detector.predict(frame, conf=SystemConfig.CONFIDENCE_THRESHOLD, verbose=False)
             self.current_detections = []
             current_ocr = None
@@ -920,58 +962,49 @@ class DashboardFrame(ctk.CTkFrame):
                     cls_id = int(box.cls[0])
                     
                     if cls_id == 0: # Car
+                        car_crop = frame[y1:y2, x1:x2]
                         w_box, h_box = x2-x1, y2-y1
                         dist, real_h = estimate_distance_and_size(w_box, h_box)
                         self.last_known_dist = dist
                         self.last_known_height = real_h
                         
-                        if w_box > 50:
-                            try:
-                                car_crop = frame[y1:y2, x1:x2]
-                                color_res = self.color_model.predict(car_crop, conf=SystemConfig.CONFIDENCE_THRESHOLD, verbose=False)
-                                self.last_known_color = color_res[0].names[color_res[0].probs.top1]
-                            except: pass
+                        if car_crop.shape[0] > 10 and car_crop.shape[1] > 10:
+                            color_res = self.color_model.predict(car_crop, verbose=False)
+                            self.last_known_color = color_res[0].names[color_res[0].probs.top1]
                         
                         self.current_detections.append([x1,y1,x2,y2, 0, f"{self.last_known_color}", dist])
 
                     elif cls_id == 1: # Plate
+                        text = '' 
+                        self.current_detections.append([x1,y1,x2,y2, 1, current_ocr, 0])
                         cy = (y1 + y2) // 2
-                        if (line_y - 100) < cy < (line_y + 100):
+                        
+                        if (line_y - 150) < cy < (line_y + 150):
                             plate_crop = frame[y1:y2, x1:x2]
-                            clean = preprocess_plate(plate_crop)
-                            ocr_res = self.reader.readtext(clean, allowlist=self.ALLOW_LIST)
-                            if ocr_res:
-                                detections = sorted(
-                                    [res for res in ocr_res if res[2] > 0.6 and len(res[1].strip()) > 1],
-                                    key=lambda res: res[0][0][0]
-                                )
-                                if detections:
-                                    texts = [res[1].upper() for res in detections]
-                                    txt = "".join(texts)
-                                    conf = max(res[2] for res in detections)
-                                    if conf > 0.4:
-                                        current_ocr = auto_correct_plate(txt)
-                                        current_conf = conf
 
-                                        is_vanity = False
-                                        raw_upper = txt.upper()
-                                        for vp in VANITY_PREFIXES:
-                                            if raw_upper.startswith(vp) or vp in raw_upper[:len(vp) + 4]:
-                                                is_vanity = True
-                                                break
+                            if plate_crop.shape[0] > 10 and plate_crop.shape[1] > 10:
+                                clean = preprocess_plate(plate_crop)
+                                ocr_res = self.reader.readtext(clean, allowlist=self.ALLOW_LIST,text_threshold=0.4,low_text=0.3,link_threshold=0.2,width_ths=0.8)
 
-                                        if is_vanity:
-                                            current_ocr = txt.replace('0', 'O').replace('1', 'I')
-                                            # print(f"Vanity plate detected: {current_ocr} (raw trusted)")
-                                        else:
-                                            current_ocr = auto_correct_plate(txt)
-                                            # print(f"Normal plate corrected: {current_ocr}")
+                                if ocr_res and len(ocr_res) > 0:
+                                    raw_text = "".join([res[1] for res in ocr_res])
+                                    text = auto_correct_plate(raw_text)
 
-                                        self.current_detections.append([x1,y1,x2,y2, 1, current_ocr, 0])
-                                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0,0,255), 3)
+                                    if not text:
+                                        continue
+                                    
+                                    conf = ocr_res[0][2]
 
-            # SAVE LOGIC
+                                    if conf < 0.6:
+                                        continue
+
+                                    current_ocr = text
+                                    current_conf = conf
+                                    self.current_detections[-1][5] = text
+
+            # --- SAVE LOGIC ---
             if current_ocr:
+                self.frames_without_plate = 0
                 self.plate_buffer.append(current_ocr)
                 self.conf_buffer.append(current_conf)
                 self.color_buffer.append(self.last_known_color)
@@ -979,25 +1012,53 @@ class DashboardFrame(ctk.CTkFrame):
                 self.height_buffer.append(self.last_known_height)
                 
                 if len(self.plate_buffer) > self.BUFFER_SIZE:
-                    self.plate_buffer.pop(0); self.conf_buffer.pop(0)
-                    self.color_buffer.pop(0); self.dist_buffer.pop(0); self.height_buffer.pop(0)
+                    self.plate_buffer.pop(0) 
+                    self.conf_buffer.pop(0)
+                    self.color_buffer.pop(0) 
+                    self.dist_buffer.pop(0) 
+                    self.height_buffer.pop(0)
 
                 if len(self.plate_buffer) == self.BUFFER_SIZE:
                     top_plate, count = Counter(self.plate_buffer).most_common(1)[0]
                     if count >= 3:
                         now = datetime.datetime.now()
                         if (now - self.last_saved_time).total_seconds() > self.COOLDOWN_SECONDS:
-                            self.save_record(now, top_plate, self.conf_buffer[0], self.color_buffer[0], self.dist_buffer[0], self.height_buffer[0], image=self.current_clean_frame)
-                            # print(self.plate_buffer)
+                            self.save_record(
+                                now, 
+                                top_plate, 
+                                self.conf_buffer[0], 
+                                self.color_buffer[0], 
+                                self.dist_buffer[0], 
+                                self.height_buffer[0], 
+                                image=self.current_clean_frame
+                            )
+                            logger.debug("Committed plate buffer: %s", self.plate_buffer)
                             self.last_saved_time = now
-                            self.plate_buffer = []
+                            
+                            self.plate_buffer.clear()
+                            self.conf_buffer.clear()
+                            self.color_buffer.clear()
+                            self.dist_buffer.clear()
+                            self.height_buffer.clear()
+            else:
+                # --- AUTO-FLUSH LOGIC (Properly aligned with "if current_ocr:") ---
+                self.frames_without_plate += 1
+                if self.frames_without_plate > 10:
+                    self.plate_buffer.clear()
+                    self.conf_buffer.clear()
+                    self.color_buffer.clear()
+                    self.dist_buffer.clear()
+                    self.height_buffer.clear()
 
-        # Draw
-        for x1, y1, x2, y2, cid, lbl, d in self.current_detections:
+        # --- DRAW LOGIC (Moved outside the 3-frame check to prevent flickering!) ---
+        for x1, y1, x2, y2, cid, lbl, d in getattr(self, 'current_detections', []):
             color = (255,255,0) if cid==0 else (0,255,0)
             cv2.rectangle(frame, (x1,y1), (x2,y2), color, 2)
-            cv2.putText(frame, lbl, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Handle the case where lbl might be None before drawing
+            display_label = lbl if lbl is not None else ""
+            cv2.putText(frame, display_label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
+        # --- RETURN (Must be at the absolute edge of the function!) ---
         return frame
 
     def manual_correction_popup(self):
@@ -1031,9 +1092,9 @@ class DashboardFrame(ctk.CTkFrame):
                         }
                         ref.child('detection_logs').child(self.user_id).child(new_plate).set(data)
                         self.last_saved_plate_key = new_plate
-                        # print(f"✅ Manual Update: {new_plate}")
+                        logger.info("Manual correction uploaded: %s", new_plate)
                 except Exception as e:
-                    pass # print(f"Update failed: {e}")
+                    logger.error("Manual correction cloud update failed for %s: %s", new_plate, e)
 
             with open(self.csv_filename, 'a', newline='') as f:
                 csv.writer(f).writerow([
@@ -1060,9 +1121,9 @@ class DashboardFrame(ctk.CTkFrame):
                 img_name = f"{plate}_{timestamp_str}.jpg"
                 save_path = os.path.join(self.img_folder, img_name)
                 cv2.imwrite(save_path, image)
-                # print(f"📸 Image Saved: {save_path}")
+                logger.info("Image saved: %s", save_path)
             except Exception as e:
-                pass # print(f"⚠️ Image Save Failed: {e}")
+                logger.error("Image save failed for plate %s: %s", plate, e)
 
         if ref and self.user_id:
             data = {
@@ -1077,9 +1138,9 @@ class DashboardFrame(ctk.CTkFrame):
             try:
                 ref.child('detection_logs').child(self.user_id).child(plate).set(data)
                 self.last_saved_plate_key = plate
-                # print(f"Uploaded: {plate} for User {self.camera_ip}")
+                logger.info("Uploaded plate %s for camera %s", plate, self.camera_ip)
             except Exception as e:
-                pass # print(f"Cloud Error: {e}")
+                logger.error("Cloud upload failed for plate %s: %s", plate, e)
 
     def update_camera(self):
         if not self.is_running: return
@@ -1161,5 +1222,7 @@ class App(ctk.CTk):
             self.current_frame.destroy()
 
 if __name__ == "__main__":
-    app = App()
+    app = App() 
+    app.geometry("1280x720")
+    app.resizable(False, False) 
     app.mainloop()
