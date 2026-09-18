@@ -102,7 +102,7 @@ For development, or to modify the detection/OCR logic.
    pip install -r requirements.txt
    ```
 3. Download `best.pt` and `color.pt` from the
-   [latest Release](../../releases/latest) and place them in the project
+   [main](../../) and place them in the project
    root (same folder as `LRP_system.py`).
 4. Run the app:
    ```bash
