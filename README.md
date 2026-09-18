@@ -50,9 +50,9 @@ to correct common OCR misreads against real Malaysian plate formats.
 └── README.md
 ```
 
-> `best.pt` and `color.pt` are distributed as assets on the
-> [Releases](../../releases) page rather than committed directly, due to
-> their size.
+> The packaged Windows build is distributed as an installer
+> (`Setup.exe`) on the [Releases](../../releases) page rather than
+> committed to the repo directly, due to its size.
 
 ## Getting Started
 
@@ -61,10 +61,18 @@ to correct common OCR misreads against real Malaysian plate formats.
 No Python installation required.
 
 1. Go to the [**Releases**](../../releases/latest) page.
-2. Download the `.exe` from the latest release (**v1.1.0**).
-3. Run it — the application will open directly.
-4. Log in or register, select a camera source, then launch the detection
-   dashboard.
+2. Download `Setup.exe` from the latest release (**v1.1.0**).
+3. Run `Setup.exe` and follow the installation wizard.
+4. Once installed, launch the application from the Start Menu or
+   desktop shortcut created by the installer.
+
+   > ⚠️ **Do not move `LRP_system.exe` out of its installed folder on
+   > its own.** It depends on the accompanying `_internal` folder
+   > sitting next to it — moving or copying only the `.exe` will
+   > prevent the app from launching. Use the shortcut created by the
+   > installer, or run it directly from the installed folder.
+5. Log in or register, select a camera source, then launch the
+   detection dashboard.
 
 > A Firebase project is required for login/registration and cloud sync
 > to work. If you're running this outside of the original developer
@@ -104,9 +112,14 @@ For development, or to modify the detection/OCR logic.
 ## Known Limitations / Future Work
 
 - The packaged application is built for **Windows only** (camera
-  connection uses `cv2.CAP_DSHOW`, and the release is a Windows `.exe`).
+  connection uses `cv2.CAP_DSHOW`, and the release is a Windows
+  installer).
 - Distance estimation assumes an average car width for all vehicle
   types; this could be made more accurate by branching the calibration
   by detected vehicle class (car / motorcycle / truck).
 - Firebase security rules and password handling should be reviewed
   before any production deployment.
+
+## License
+
+Specify your license here (e.g. MIT).
